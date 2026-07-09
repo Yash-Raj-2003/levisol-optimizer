@@ -221,7 +221,7 @@ def run_optimization(data, freight_multiplier, demand_multiplier, ss_penalty_cfa
             prob += ClosingInv[s, c] - U[s, c] == opening_c + inbound_c - fcst
             prob += ClosingInv[s, c] + W[s, c] >= ss_cfa.get((s, c), 0)
 
-    prob.solve(get_cbc_solver(msg=False))
+    prob.solve()
 
     prod_data, route_data, short_data = [], [], []
     for (s, p), var in B.items():
