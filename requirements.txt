@@ -1,6 +1,6 @@
-streamlit==1.30.0
-pandas==2.1.4
-pulp==2.7.0
-plotly==5.18.0
-openpyxl==3.1.2
-xlsxwriter==3.1.9
+streamlit==1.59.1
+pandas==3.0.2
+pulp==3.3.2
+plotly==6.8.0
+openpyxl==3.1.5
+XlsxWriter==3.2.9
