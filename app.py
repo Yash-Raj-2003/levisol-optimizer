@@ -18,6 +18,21 @@ st.set_page_config(page_title="Levisol Network Optimizer", layout="wide", page_i
 # SOLVER HELPER (Windows-on-ARM64 Fix)
 # ==========================================
 def get_cbc_solver(msg=False):
+    """
+    Returns a working CBC solver instance for PuLP.
+
+    - On every normal platform (Linux/macOS/Windows-x64 -- including
+      Streamlit Community Cloud, which runs Linux x64): just use the
+      default PULP_CBC_CMD with no custom path.
+    - On Windows-on-ARM64 only: PuLP has no bundled win/arm64 binary, so we
+      point at the bundled win/i64 (x64) binary instead, which Windows 11
+      on ARM runs fine via its built-in x64 emulation.
+      IMPORTANT: recent PuLP versions raise
+      "PulpSolverError: Use COIN_CMD if you want to set a path"
+      if you pass `path=` to PULP_CBC_CMD. COIN_CMD accepts the exact same
+      arguments and IS allowed to take a custom path, so we use that class
+      instead whenever a custom path is required.
+    """
     is_windows_arm = (
         platform.system() == "Windows"
         and platform.machine().lower() in ("arm64", "aarch64")
@@ -31,9 +46,13 @@ def get_cbc_solver(msg=False):
 
     for cbc_exe in candidates:
         if os.path.isfile(cbc_exe):
-            return pl.PULP_CBC_CMD(msg=msg, path=cbc_exe)
+            return pl.COIN_CMD(msg=msg, path=cbc_exe)
 
-    raise RuntimeError("No usable CBC solver binary found for ARM64. Run on Streamlit Cloud.")
+    raise RuntimeError(
+        "No usable CBC solver binary found for Windows on ARM64.\n"
+        "Run:  pip install pulp[cbc]   then use pl.COIN_CMD(msg=False) with no path,\n"
+        "or deploy on Streamlit Community Cloud (Linux x64), which works with no changes."
+    )
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -87,7 +106,7 @@ def load_and_preprocess_data(file_bytes):
     df_inv = load_clean_sheet(xls, 'I - Expected opening Inventory', 'CFA')
     df_demand = load_clean_sheet(xls, 'J - Jan Forecast', 'CFA')
 
-    # CRITICAL FIX: Force numeric coercion to turn Text Footers into NaNs, THEN drop them
+    # Force numeric coercion to turn text footers into NaNs, then drop them
     df_plants['Production Cost (₹/kl)'] = pd.to_numeric(df_plants['Production Cost (₹/kl)'], errors='coerce')
     df_plants = df_plants.dropna(subset=['Production Cost (₹/kl)'])
 
@@ -102,14 +121,15 @@ def load_and_preprocess_data(file_bytes):
     df_demand[jan_col_dem] = pd.to_numeric(df_demand[jan_col_dem], errors='coerce')
     df_demand = df_demand.dropna(subset=[jan_col_dem])
 
-    # Normalize loc to code
+    # Normalize plant identifiers: Sheet B uses full Location names, everywhere
+    # else uses Plant Code
     loc_to_code = df_plants.set_index('Location')['Plant Code'].to_dict()
     df_p2h['From Plant'] = df_p2h['From Plant'].map(loc_to_code).fillna(df_p2h['From Plant'])
 
+    # Normalize CFA identifiers: Sheets I/J use "<City> CFA", Sheet C uses "<City>"
     df_inv['CFA'] = df_inv['CFA'].apply(strip_cfa_suffix)
     df_demand['CFA'] = df_demand['CFA'].apply(strip_cfa_suffix)
 
-    # Melt and enforce numeric on transport matrices
     df_p2h = sanitize_hub_cols(df_p2h)
     df_h2c = sanitize_hub_cols(df_h2c)
 
@@ -121,11 +141,11 @@ def load_and_preprocess_data(file_bytes):
     df_h2c_melt['Cost'] = pd.to_numeric(df_h2c_melt['Cost'], errors='coerce')
     df_h2c_melt = df_h2c_melt.dropna(subset=['Cost'])
 
+    # Drop hub-level pseudo-CFA rows ("Mother Hub West/East") -- not real CFAs
     valid_cfas = set(df_h2c_melt['CFA'].unique())
     df_inv = df_inv[df_inv['CFA'].isin(valid_cfas)]
     df_demand = df_demand[df_demand['CFA'].isin(valid_cfas)]
 
-    # Compile Dictionaries
     data = {}
     data['cost_prod'] = df_plants.set_index('Plant Code')['Production Cost (₹/kl)'].to_dict()
 
@@ -135,7 +155,6 @@ def load_and_preprocess_data(file_bytes):
         for col in df_plants.columns:
             val = pd.to_numeric(row[col], errors='coerce')
             if pd.isna(val): val = 0.0
-
             if '<=1.5' in str(col): cap_line[(plant, '<=1.5 LT')] = val
             elif '3-' in str(col) and '5' in str(col): cap_line[(plant, '3- 5 LT')] = val
             elif '7-' in str(col) and '20' in str(col): cap_line[(plant, '7- 20 LT')] = val
@@ -188,7 +207,6 @@ def run_optimization(data, freight_multiplier, demand_multiplier, ss_penalty_cfa
     W = pl.LpVariable.dicts("SS_Shortfall_CFA", [(s, c) for s in SKUs for c in CFAs], lowBound=0, cat='Continuous')
     V = pl.LpVariable.dicts("SS_Shortfall_Hub", [(s, h) for s in SKUs for h in Hubs], lowBound=0, cat='Continuous')
 
-    # Explicitly cast coefficients to float to avoid string-multiplier crash
     prob += (
         pl.lpSum(float(data['cost_prod'].get(p, 999999)) * 25 * B[s, p] for s in SKUs for p in Plants) +
         pl.lpSum((float(data['cost_p2h'].get((p, h), 999999)) * freight_multiplier) * X[s, p, h] for s in SKUs for p in Plants for h in Hubs) +
@@ -221,7 +239,8 @@ def run_optimization(data, freight_multiplier, demand_multiplier, ss_penalty_cfa
             prob += ClosingInv[s, c] - U[s, c] == opening_c + inbound_c - fcst
             prob += ClosingInv[s, c] + W[s, c] >= ss_cfa.get((s, c), 0)
 
-    prob.solve()
+    # Use the platform-safe solver getter instead of a bare prob.solve()
+    prob.solve(get_cbc_solver(msg=False))
 
     prod_data, route_data, short_data = [], [], []
     for (s, p), var in B.items():
@@ -282,7 +301,6 @@ else:
             try:
                 f_mult = 1 + (freight_surcharge / 100.0)
                 ss_pen = 5_000 if "Relaxed" in ss_policy else 500_000
-
                 df_prod, df_route, df_short, t_cost, f_rate, t_unmet, cap_dict = run_optimization(data, f_mult, demand_surge, ss_pen)
             except RuntimeError as e:
                 st.error(str(e))
@@ -342,7 +360,6 @@ else:
             with col_right:
                 st.markdown("### CFA Shortfall Heatmap")
                 if not df_short.empty:
-                    # CRITICAL FIX: Safe pivot_table aggregation to avoid duplicate index errors
                     df_heat = df_short.groupby(['CFA', 'Type'])['Volume_kL'].sum().reset_index()
                     df_heat_pivot = df_heat.pivot_table(index='Type', columns='CFA', values='Volume_kL', aggfunc='sum').fillna(0)
                     fig_heat = px.imshow(df_heat_pivot, text_auto=True, aspect="auto",
