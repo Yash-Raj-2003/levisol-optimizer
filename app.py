@@ -18,21 +18,6 @@ st.set_page_config(page_title="Levisol Network Optimizer", layout="wide", page_i
 # SOLVER HELPER (Windows-on-ARM64 Fix)
 # ==========================================
 def get_cbc_solver(msg=False):
-    """
-    Returns a working CBC solver instance for PuLP.
-
-    - On every normal platform (Linux/macOS/Windows-x64 -- including
-      Streamlit Community Cloud, which runs Linux x64): just use the
-      default PULP_CBC_CMD with no custom path.
-    - On Windows-on-ARM64 only: PuLP has no bundled win/arm64 binary, so we
-      point at the bundled win/i64 (x64) binary instead, which Windows 11
-      on ARM runs fine via its built-in x64 emulation.
-      IMPORTANT: recent PuLP versions raise
-      "PulpSolverError: Use COIN_CMD if you want to set a path"
-      if you pass `path=` to PULP_CBC_CMD. COIN_CMD accepts the exact same
-      arguments and IS allowed to take a custom path, so we use that class
-      instead whenever a custom path is required.
-    """
     is_windows_arm = (
         platform.system() == "Windows"
         and platform.machine().lower() in ("arm64", "aarch64")
@@ -106,7 +91,6 @@ def load_and_preprocess_data(file_bytes):
     df_inv = load_clean_sheet(xls, 'I - Expected opening Inventory', 'CFA')
     df_demand = load_clean_sheet(xls, 'J - Jan Forecast', 'CFA')
 
-    # Force numeric coercion to turn text footers into NaNs, then drop them
     df_plants['Production Cost (₹/kl)'] = pd.to_numeric(df_plants['Production Cost (₹/kl)'], errors='coerce')
     df_plants = df_plants.dropna(subset=['Production Cost (₹/kl)'])
 
@@ -121,12 +105,9 @@ def load_and_preprocess_data(file_bytes):
     df_demand[jan_col_dem] = pd.to_numeric(df_demand[jan_col_dem], errors='coerce')
     df_demand = df_demand.dropna(subset=[jan_col_dem])
 
-    # Normalize plant identifiers: Sheet B uses full Location names, everywhere
-    # else uses Plant Code
     loc_to_code = df_plants.set_index('Location')['Plant Code'].to_dict()
     df_p2h['From Plant'] = df_p2h['From Plant'].map(loc_to_code).fillna(df_p2h['From Plant'])
 
-    # Normalize CFA identifiers: Sheets I/J use "<City> CFA", Sheet C uses "<City>"
     df_inv['CFA'] = df_inv['CFA'].apply(strip_cfa_suffix)
     df_demand['CFA'] = df_demand['CFA'].apply(strip_cfa_suffix)
 
@@ -141,7 +122,6 @@ def load_and_preprocess_data(file_bytes):
     df_h2c_melt['Cost'] = pd.to_numeric(df_h2c_melt['Cost'], errors='coerce')
     df_h2c_melt = df_h2c_melt.dropna(subset=['Cost'])
 
-    # Drop hub-level pseudo-CFA rows ("Mother Hub West/East") -- not real CFAs
     valid_cfas = set(df_h2c_melt['CFA'].unique())
     df_inv = df_inv[df_inv['CFA'].isin(valid_cfas)]
     df_demand = df_demand[df_demand['CFA'].isin(valid_cfas)]
@@ -239,7 +219,6 @@ def run_optimization(data, freight_multiplier, demand_multiplier, ss_penalty_cfa
             prob += ClosingInv[s, c] - U[s, c] == opening_c + inbound_c - fcst
             prob += ClosingInv[s, c] + W[s, c] >= ss_cfa.get((s, c), 0)
 
-    # Use the platform-safe solver getter instead of a bare prob.solve()
     prob.solve(get_cbc_solver(msg=False))
 
     prod_data, route_data, short_data = [], [], []
@@ -276,17 +255,19 @@ def run_optimization(data, freight_multiplier, demand_multiplier, ss_penalty_cfa
     return df_prod, df_route, df_short, total_cost, fill_rate, total_unmet, data['cap_line']
 
 # ==========================================
-# STREAMLIT UI
+# STREAMLIT UI (With Castrol Corporate Branding)
 # ==========================================
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/en/thumb/8/87/Castrol_logo.svg/1200px-Castrol_logo.svg.png", width=150)
-st.sidebar.title("Control Room")
+# 1. Castrol Brand Logo & Styled Header
+st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/d/db/Castrol_logo.svg/512px-Castrol_logo.svg.png", use_container_width=True)
+st.sidebar.markdown("<h2 style='text-align: center; color: #00B140; font-family: Arial, sans-serif; font-weight: 800;'>Control Room</h2>", unsafe_allow_html=True)
+st.sidebar.markdown("---")
 
 uploaded_file = st.sidebar.file_uploader("Upload Data (Baseline or Shock)", type=['xlsx'])
 freight_surcharge = st.sidebar.slider("Freight Cost Surcharge (%)", 0, 100, 0, 5)
 demand_surge = st.sidebar.slider("Network Demand Multiplier", 1.0, 2.0, 1.0, 0.1)
 ss_policy = st.sidebar.selectbox("Safety Stock Ring-Fencing", ["Strict (High Penalty)", "Relaxed (Buffer Drain)"])
 
-run_btn = st.sidebar.button("Execute Network Optimization", type="primary")
+run_btn = st.sidebar.button("Execute Network Optimization", type="primary", use_container_width=True)
 
 st.title("Levisol Supply Chain Control Tower")
 
@@ -325,6 +306,7 @@ else:
 
             st.divider()
 
+            # 2. Enhanced Sankey Visibility & Castrol Branding
             st.markdown("### Active Network Flow")
             if not df_route.empty:
                 df_flow = df_route.groupby(['Origin', 'Dest'])['Volume_kL'].sum().reset_index()
@@ -332,14 +314,23 @@ else:
                 node_map = {node: i for i, node in enumerate(all_nodes)}
 
                 fig_sankey = go.Figure(data=[go.Sankey(
-                    node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=all_nodes, color="#2B2B2B"),
+                    node=dict(
+                        pad=20, 
+                        thickness=25, 
+                        line=dict(color="white", width=1), 
+                        label=all_nodes, 
+                        color="#E31837" # Castrol Red nodes for sharp contrast
+                    ),
                     link=dict(
                         source=[node_map[src] for src in df_flow['Origin']],
                         target=[node_map[tgt] for tgt in df_flow['Dest']],
                         value=df_flow['Volume_kL'],
-                        color="#00B140"
+                        color="rgba(0, 177, 64, 0.45)" # Castrol Green (semi-transparent)
                     ))])
-                fig_sankey.update_layout(height=400, margin=dict(l=0, r=0, t=20, b=20))
+
+                # Force bold, large text for clear visibility
+                fig_sankey.update_traces(textfont=dict(size=14, family="Arial Black", color="black"))
+                fig_sankey.update_layout(height=450, margin=dict(l=10, r=10, t=25, b=25))
                 st.plotly_chart(fig_sankey, use_container_width=True)
             else:
                 st.warning("No routing volume generated.")
@@ -349,10 +340,12 @@ else:
             col_left, col_right = st.columns(2)
 
             with col_left:
+                # 3. Bar Chart Castrol Color Theme
                 st.markdown("### Line Capacity Utilization")
                 if not df_prod.empty:
+                    castrol_palette = ['#00B140', '#E31837', '#2B2B2B', '#7A7A7A', '#D9D9D9']
                     fig_bar = px.bar(df_prod_grouped, x='Plant', y='Volume_kL', color='Line',
-                                     color_discrete_sequence=px.colors.qualitative.Prism)
+                                     color_discrete_sequence=castrol_palette)
                     st.plotly_chart(fig_bar, use_container_width=True)
                 else:
                     st.info("No production volume.")
@@ -382,5 +375,6 @@ else:
                 data=output.getvalue(),
                 file_name="Levisol_January_Plan.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
+                type="primary",
+                use_container_width=True
             )
